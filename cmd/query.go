@@ -1,8 +1,8 @@
 package cmd
 
 import (
+	"encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"strconv"
@@ -15,26 +15,32 @@ import (
 )
 
 var queryCmdABIFile string
+var queryHexData string
 
 func init() {
 	queryCmd.Flags().StringVarP(&queryCmdABIFile, "abi-file", "", "", "the path of abi file, if this option specified, 'function definition' can be just function name")
+	queryCmd.Flags().StringVarP(&queryHexData, "hex-data", "", "", "the input hex data")
 }
 
 var queryCmd = &cobra.Command{
-	Use:   "query contract_address 'function definition' arg1 arg2 ...",
+	Use:   "query CONTRACT-ADDRESS ['function definition' arg1 arg2 ...]",
 	Short: "Invokes the (constant) contract method",
-	Args:  cobra.MinimumNArgs(2),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(queryHexData) > 0 && len(args) > 1 {
+			return fmt.Errorf("--hex-data and 'function definition' cannot be specified at the same time")
+		}
+		return nil
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		if !validationQueryCmdOpts(args) {
 			_ = cmd.Help()
 			os.Exit(1)
 		}
+		log.Printf("Current chain is %v", globalOptChain)
 
 		InitGlobalClient(globalOptNodeUrl)
 
 		contractAddr := args[0]
-		funcSignature := args[1]
-		inputArgData := args[2:]
 
 		if !globalOptDryRun {
 			// don't check contract address if --dry-run specified
@@ -47,8 +53,31 @@ var queryCmd = &cobra.Command{
 			}
 		}
 
+		if len(queryHexData) > 0 {
+			// Case 1: user provide tx input data
+			if has0xPrefix(queryHexData) {
+				queryHexData = queryHexData[2:]
+			}
+			txInputData, err := hex.DecodeString(queryHexData)
+			checkErr(err)
+			output, err := Call(globalClient.RpcClient, common.HexToAddress(contractAddr), txInputData)
+			checkErr(err)
+
+			log.Printf("Output raw data\n%v\n", hex.EncodeToString(output))
+			// Pretty print output raw data
+			num := len(output) / 32
+			for i := 0; i <= num-1; i++ {
+				fmt.Printf("[%d]:  %v\n", i, hexutil.Encode(output[32*i:32*(i+1)]))
+			}
+			return
+		}
+
+		// Case 2: construct tx input data
+		funcSignature := args[1]
+		inputArgData := args[2:]
+
 		if queryCmdABIFile != "" {
-			abiContent, err := ioutil.ReadFile(queryCmdABIFile)
+			abiContent, err := os.ReadFile(queryCmdABIFile)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -65,7 +94,7 @@ var queryCmd = &cobra.Command{
 			log.Printf("input data = %v", hexutil.Encode(txInputData))
 		}
 
-		output, err := Call(globalClient.EthClient, common.HexToAddress(contractAddr), txInputData)
+		output, err := Call(globalClient.RpcClient, common.HexToAddress(contractAddr), txInputData)
 		checkErr(err)
 
 		printContractReturnData(funcSignature, output)
@@ -76,6 +105,17 @@ func printContractReturnData(funcDefinition string, output []byte) {
 	var v = make(map[string]interface{})
 	returnArgs, err := buildReturnArgs(funcDefinition)
 	checkErr(err)
+
+	log.Printf("Output raw data\n%v\n", hex.EncodeToString(output))
+	// Pretty print output raw data
+	num := len(output) / 32
+	for i := 0; i <= num-1; i++ {
+		fmt.Printf("[%d]:  %v\n", i, hexutil.Encode(output[32*i:32*(i+1)]))
+	}
+	if len(returnArgs) == 0 {
+		// Return if type of function not specified
+		return
+	}
 
 	// Unpack hex data into v
 	err = returnArgs.UnpackIntoMap(v, output)
@@ -106,6 +146,7 @@ func printContractReturnData(funcDefinition string, output []byte) {
 	}
 
 	// fmt.Printf("raw output:\n%s\n", hex.Dump(output))
+	return
 }
 
 func validationQueryCmdOpts(args []string) bool {
@@ -129,7 +170,7 @@ func buildReturnArgs(funcDefinition string) (abi.Arguments, error) {
 	if leftParenthesisLoc < 0 {
 		return nil, fmt.Errorf("char ) is not found after keyword returns")
 	}
-	rightParenthesisLoc := strings.Index(partAfterReturns, ")")
+	rightParenthesisLoc := strings.LastIndex(partAfterReturns, ")")
 	if rightParenthesisLoc < 0 {
 		return nil, fmt.Errorf("char ) is not found after keyword returns")
 	}
@@ -137,30 +178,40 @@ func buildReturnArgs(funcDefinition string) (abi.Arguments, error) {
 	var theReturnTypes abi.Arguments
 
 	returnPart := partAfterReturns[leftParenthesisLoc+1 : rightParenthesisLoc]
-	returnList := strings.Split(returnPart, ",")
+	returnList := splitData(returnPart)
 	for index, returnElem := range returnList {
-		fields := strings.Fields(returnElem)
-		if len(fields) == 0 {
-			return nil, fmt.Errorf("func definition `%v` invalid, type missing in returns", funcDefinition)
-		}
-
-		typ, err := abi.NewType(typeNormalize(fields[0]), "", nil)
-		if err != nil {
-			return nil, fmt.Errorf("abi.NewType fail: %w", err)
-		}
-
 		theReturnName := "ret" + strconv.FormatInt(int64(index), 10) // default name ret0, ret1, etc
-		if len(fields) > 1 {
-			if fields[1] == "memory" || fields[1] == "calldata" {
-				// skip keyword "memory" and "calldata"
-				if len(fields) > 2 {
-					theReturnName = fields[2]
-				}
-			} else {
-				theReturnName = fields[1]
+
+		if strings.HasSuffix(returnElem, "]") { // array
+			typ, err := BuildTupleArrayType(returnElem)
+			if err != nil {
+				return nil, fmt.Errorf("BuildTupleArrayType fail: %w", err)
 			}
+			theReturnTypes = append(theReturnTypes, abi.Argument{Type: typ, Name: theReturnName})
+		} else {
+			log.Printf("returnElem = %v", returnElem)
+			fields := strings.Fields(returnElem)
+			if len(fields) == 0 {
+				return nil, fmt.Errorf("func definition `%v` invalid, type missing in returns", funcDefinition)
+			}
+
+			typ, err := abi.NewType(typeNormalize(fields[0]), "", nil)
+			if err != nil {
+				return nil, fmt.Errorf("abi.NewType fail: %w", err)
+			}
+
+			if len(fields) > 1 {
+				if fields[1] == "memory" || fields[1] == "calldata" {
+					// skip keyword "memory" and "calldata"
+					if len(fields) > 2 {
+						theReturnName = fields[2]
+					}
+				} else {
+					theReturnName = fields[1]
+				}
+			}
+			theReturnTypes = append(theReturnTypes, abi.Argument{Type: typ, Name: theReturnName})
 		}
-		theReturnTypes = append(theReturnTypes, abi.Argument{Type: typ, Name: theReturnName})
 	}
 
 	return theReturnTypes, nil

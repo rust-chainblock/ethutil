@@ -21,12 +21,9 @@ func init() {
 var downloadSrcCmd = &cobra.Command{
 	Use:   "download-src [flags] contract-address",
 	Short: "Download source code of contract from block explorer platform, eg. etherscan.",
+	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		if len(args) == 0 {
-			// if no file specified, read from stdin
-			panic("no contract-address")
-			return
-		}
+		log.Printf("Current chain is %v", globalOptChain)
 
 		if err := downloadSrc(args[0]); err != nil {
 			log.Fatalf("downloadSrc failed %v", err)
@@ -35,7 +32,7 @@ var downloadSrcCmd = &cobra.Command{
 }
 
 func downloadSrc(contractAddress string) error {
-	var requestUrl = fmt.Sprintf(nodeApiUrlMap[globalOptNode], contractAddress)
+	var requestUrl = fmt.Sprintf(nodeApiUrlMap[globalOptChain], contractAddress)
 
 	resp, err := http.Get(requestUrl)
 	if err != nil {
@@ -50,12 +47,12 @@ func downloadSrc(contractAddress string) error {
 	}
 
 	type respMsg struct {
-		Status  string   `json:"status"`
-		Message string   `json:"message"`
-		Result  []struct{
-			SourceCode string `json:"SourceCode"`
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Result  []struct {
+			SourceCode   string `json:"SourceCode"`
 			ContractName string `json:"ContractName"`
-		}   `json:"result"`
+		} `json:"result"`
 	}
 
 	var data respMsg
@@ -86,8 +83,8 @@ func downloadSrc(contractAddress string) error {
 			Content string `json:"content"`
 		}
 		type sourceJson struct {
-			Language string `json:"language"`
-			Sources map[string]*SourcesInfo `json:"sources"`
+			Language string                  `json:"language"`
+			Sources  map[string]*SourcesInfo `json:"sources"`
 		}
 
 		var data sourceJson
@@ -113,7 +110,7 @@ func downloadSrc(contractAddress string) error {
 		// An example: https://api.etherscan.io/api?module=contract&action=getsourcecode&address=0x35036A4b7b012331f23F2945C08A5274CED38AC2
 
 		type sourceJson struct {
-			X map[string]struct{
+			X map[string]struct {
 				Content string `json:"content"`
 			} `json:"-"` // Rest of the fields should go here.
 			// See https://stackoverflow.com/questions/33436730/unmarshal-json-with-some-known-and-some-unknown-field-names
@@ -130,7 +127,7 @@ func downloadSrc(contractAddress string) error {
 	} else {
 		// Solidity Single file
 		// An example: https://api.etherscan.io/api?module=contract&action=getsourcecode&address=0xdac17f958d2ee523a2206206994597c13d831ec7
-		saveContract(filepath.Join(downloadSrcCmdSaveDir, data.Result[0].ContractName + ".sol"), sourceCode)
+		saveContract(filepath.Join(downloadSrcCmdSaveDir, data.Result[0].ContractName+".sol"), sourceCode)
 	}
 
 	return nil

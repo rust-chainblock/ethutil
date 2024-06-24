@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 
 var balanceSortOpt string
 var balanceUnit string
+var balanceInputFile string
 
 const sortNo = "no"
 const sortAsc = "asc"
@@ -26,6 +28,7 @@ const unitEther = "ether"
 func init() {
 	balanceCmd.Flags().StringVarP(&balanceSortOpt, "sort", "s", "no", "no | asc | desc, sort result")
 	balanceCmd.Flags().StringVarP(&balanceUnit, "unit", "u", "ether", "wei | gwei | ether, unit of balance")
+	balanceCmd.Flags().StringVarP(&balanceInputFile, "input-file", "f", "", "read address from this file, file - means read stdin")
 }
 
 func validationBalanceCmdOpts() bool {
@@ -43,17 +46,47 @@ func validationBalanceCmdOpts() bool {
 	return true
 }
 
+var addresses []string
+
 var balanceCmd = &cobra.Command{
-	Use:   "balance eth-address1 eth-address2 ...",
+	Use:   "balance ETH-ADDRESS1 [ETH-ADDRESS2 ...]",
 	Short: "Check eth balance for address",
 	Args: func(cmd *cobra.Command, args []string) error {
-		if len(args) < 1 {
-			return fmt.Errorf("requires an address at least")
+		if len(args) == 0 && len(balanceInputFile) == 0 {
+			return fmt.Errorf("requires an address at least or specify -f option")
 		}
-		for _, arg := range args {
-			if !isValidEthAddress(arg) {
-				return fmt.Errorf("%v is not a valid eth address", arg)
+
+		if len(balanceInputFile) > 0 {
+			var inputReader = cmd.InOrStdin()
+			if balanceInputFile != "-" {
+				// read from regular file
+				file, err := os.Open(balanceInputFile)
+				if err != nil {
+					return fmt.Errorf("failed open file: %v", err)
+				}
+				inputReader = file
 			}
+			scanner := bufio.NewScanner(inputReader)
+			for scanner.Scan() {
+				line := scanner.Text()
+				addresses = append(addresses, line)
+			}
+			if len(addresses) == 0 {
+				return fmt.Errorf("file %v is empty, do nothing", balanceInputFile)
+			}
+		} else {
+			addresses = args
+		}
+
+		// Validate each address
+		for _, address := range addresses {
+			if !isValidEthAddress(address) {
+				return fmt.Errorf("%v is not a valid eth address", address)
+			}
+		}
+
+		if len(addresses) > 10000 {
+			return fmt.Errorf("too many addresses (%v), can not exceed 10000", len(addresses))
 		}
 		return nil
 	},
@@ -62,8 +95,7 @@ var balanceCmd = &cobra.Command{
 			_ = cmd.Help()
 			os.Exit(1)
 		}
-
-		addresses := args
+		log.Printf("Current chain is %v", globalOptChain)
 
 		InitGlobalClient(globalOptNodeUrl)
 
@@ -77,20 +109,42 @@ var balanceCmd = &cobra.Command{
 		var results []kv
 		var finishOutput = false
 
-		for _, addr := range addresses {
-			balance, err := globalClient.EthClient.BalanceAt(ctx, common.HexToAddress(addr), nil)
+		if isMulticallDeployed(globalClient.EthClient) {
+			balances, err := queryEthBalancesByMulticall(addresses)
 			checkErr(err)
 
-			results = append(results, kv{addr, *balance})
+			for index, balance := range balances {
+				addr := addresses[index]
 
-			// print output immediately if no sort demand
-			if balanceSortOpt == sortNo {
-				if globalOptTerseOutput {
-					fmt.Printf("%v %s\n", addr, wei2Other(bigInt2Decimal(balance), balanceUnit).String())
-				} else {
-					fmt.Printf("addr %v, balance %s %s\n", addr, wei2Other(bigInt2Decimal(balance), balanceUnit).String(), balanceUnit)
+				results = append(results, kv{addr, *balance})
+
+				// print output immediately if no sort demand
+				if balanceSortOpt == sortNo {
+					if globalOptTerseOutput {
+						fmt.Printf("%v %s\n", addr, wei2Other(bigInt2Decimal(balance), balanceUnit).String())
+					} else {
+						fmt.Printf("addr %v, balance %s %s\n", addr, wei2Other(bigInt2Decimal(balance), balanceUnit).String(), balanceUnit)
+					}
+					finishOutput = true
 				}
-				finishOutput = true
+			}
+		} else {
+			for _, addr := range addresses {
+				// check balance one by one
+				balance, err := globalClient.EthClient.BalanceAt(ctx, common.HexToAddress(addr), nil)
+				checkErr(err)
+
+				results = append(results, kv{addr, *balance})
+
+				// print output immediately if no sort demand
+				if balanceSortOpt == sortNo {
+					if globalOptTerseOutput {
+						fmt.Printf("%v %s\n", addr, wei2Other(bigInt2Decimal(balance), balanceUnit).String())
+					} else {
+						fmt.Printf("addr %v, balance %s %s\n", addr, wei2Other(bigInt2Decimal(balance), balanceUnit).String(), balanceUnit)
+					}
+					finishOutput = true
+				}
 			}
 		}
 

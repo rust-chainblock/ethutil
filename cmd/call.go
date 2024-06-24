@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"io/ioutil"
 	"log"
 	"os"
 
@@ -22,7 +21,7 @@ func init() {
 }
 
 var callCmd = &cobra.Command{
-	Use:   "call contract-address 'function signature' arg1 arg2 ...",
+	Use:   "call CONTRACT-ADDRESS 'function signature' arg1 arg2 ...",
 	Short: "Invokes the (paid) contract method",
 	Args:  cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
@@ -30,6 +29,7 @@ var callCmd = &cobra.Command{
 			_ = cmd.Help()
 			os.Exit(1)
 		}
+		log.Printf("Current chain is %v", globalOptChain)
 
 		InitGlobalClient(globalOptNodeUrl)
 
@@ -49,7 +49,7 @@ var callCmd = &cobra.Command{
 		}
 
 		if callCmdABIFile != "" {
-			abiContent, err := ioutil.ReadFile(callCmdABIFile)
+			abiContent, err := os.ReadFile(callCmdABIFile)
 			if err != nil {
 				log.Fatal(err)
 			}
